@@ -1,0 +1,81 @@
+# Full hybrid: data parallel x FSDP sharding x tensor parallel x sequence parallel.
+#
+#   torchrun --standalone --nproc-per-node=8 examples/train_hybrid.py \
+#       --config configs/hybrid_8gpu.yaml
+#
+# world_size = dp(2) * shard(2) * sequence(1) * tensor(2) = 8
+#
+# Rank layout (slowest-varying dimension first: dp, shard, sequence, tensor):
+#
+#   rank  dp sh tp   data_parallel  shard    tensor
+#   ----  -- -- --   -------------  -------  -------
+#    0     0  0  0   (0, 4)         (0, 2)   (0, 1)
+#    1     0  0  1   (1, 5)         (1, 3)   (0, 1)
+#    2     0  1  0   (2, 6)         (0, 2)   (2, 3)
+#    3     0  1  1   (3, 7)         (1, 3)   (2, 3)
+#    4     1  0  0   (0, 4)         (4, 6)   (4, 5)
+#    5     1  0  1   (1, 5)         (5, 7)   (4, 5)
+#    6     1  1  0   (2, 6)         (4, 6)   (6, 7)
+#    7     1  1  1   (3, 7)         (5, 7)   (6, 7)
+#
+# Gradient path for rank 0: reduce-scatter over (0, 2), then all-reduce the
+# resulting shard over (0, 4).  Losses are averaged over dp_shard = (0, 2, 4, 6).
+#
+# On a machine without 8 GPUs this still runs on CPU with Gloo:
+#   torchrun --standalone --nproc-per-node=8 examples/train_hybrid.py \
+#       --config configs/hybrid_8gpu.yaml --backend gloo --device cpu
+name: hybrid-8
+backend: auto
+device: auto
+timeout_seconds: 600.0
+
+topology:
+  data_parallel_size: 2
+  shard_parallel_size: 2
+  sequence_parallel_size: 1
+  tensor_parallel_size: 2
+  sequence_parallel_mode: tensor_group
+
+model:
+  kind: transformer
+  vocab_size: 128
+  hidden_size: 64
+  num_heads: 4
+  num_layers: 2
+  ffn_hidden_size: 128
+  max_sequence_length: 32
+  dropout: 0.0
+
+data:
+  micro_batch_size: 2
+  sequence_length: 16
+  num_train_samples: 512
+  num_eval_samples: 64
+  seed: 1234
+
+optimizer:
+  name: adamw
+  learning_rate: 0.002
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+
+training:
+  max_steps: 30
+  gradient_accumulation_steps: 2
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  collect_metrics: true
+
+fsdp:
+  reshard_after_forward: true
+  auto_wrap_min_num_params: 0
+
+tensor_parallel:
+  sequence_parallel: true
+
+checkpoint:
+  directory: runs/hybrid-8
+  save_every_steps: 15
