@@ -1,0 +1,62 @@
+# Two-way distributed data parallelism.
+#
+#   torchrun --standalone --nproc-per-node=2 examples/train_ddp.py \
+#       --config configs/ddp_2gpu.yaml
+#
+# Parameters are replicated on both ranks; each rank sees half of every global
+# batch; gradients are averaged with one bucketed all-reduce per step over the
+# 'data_parallel' group.  The global batch is micro_batch_size * 2 = 16.
+name: ddp-2
+backend: auto
+device: auto
+timeout_seconds: 300.0
+
+topology:
+  data_parallel_size: 2
+  shard_parallel_size: 1
+  sequence_parallel_size: 1
+  tensor_parallel_size: 1
+  sequence_parallel_mode: disabled
+
+model:
+  kind: mlp
+  input_size: 32
+  hidden_size: 64
+  num_layers: 3
+  output_size: 8
+
+data:
+  micro_batch_size: 8
+  num_train_samples: 512
+  num_eval_samples: 128
+  seed: 1234
+
+optimizer:
+  name: adamw
+  learning_rate: 0.003
+  weight_decay: 0.01
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+  min_lr_ratio: 0.1
+
+training:
+  max_steps: 40
+  gradient_accumulation_steps: 2   # 2 micro-batches, one all-reduce
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  collect_metrics: true
+
+ddp:
+  bucket_cap_mb: 25.0
+  broadcast_buffers: true
+  find_unused_parameters: false
+  average_gradients: true
+  async_reduction: true
+
+checkpoint:
+  directory: runs/ddp-2
+  save_every_steps: 20
+  keep_last: 2
