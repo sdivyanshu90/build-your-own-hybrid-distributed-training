@@ -1,0 +1,207 @@
+name: CI
+
+# Static analysis and the CPU test suite run on every push and pull request.
+# Nothing here needs a GPU: every correctness claim in this project is verified
+# with Gloo on CPU.  The multi-GPU NCCL suite is a separate, manually triggered
+# workflow (see nccl.yml) because hosted runners have no GPUs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # One thread per process.  Without this, several spawned ranks each start a
+  # thread pool sized to the whole runner and fight each other for cores,
+  # which makes the distributed suite slower *and* less deterministic.
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  PYTHONHASHSEED: "0"
+
+jobs:
+  static-analysis:
+    name: lint, format, types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # CPU wheels: the CI image has no CUDA and the CUDA wheels are ~2 GB.
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check src tests examples scripts
+
+      - name: Ruff format check
+        run: ruff format --check src tests examples scripts
+
+      - name: mypy
+        run: mypy
+
+  unit-tests:
+    name: unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the declared floor; 3.12 guards against forward-compatibility
+        # regressions.  See docs/00_overview.md#python-version for why the floor
+        # is 3.10 rather than the 3.11 the specification asks for.
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest -q tests/unit --timeout=120
+
+  distributed-tests:
+    name: ${{ matrix.suite }} (Gloo, CPU)
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        # One suite per job rather than one job for everything: each spawns
+        # child processes, so running the files concurrently inside one runner
+        # multiplies the process count and turns a fast suite into a swapping
+        # one.  Separate jobs get separate runners.
+        suite:
+          - tests/distributed/test_collectives.py
+          - tests/distributed/test_ddp.py
+          - tests/distributed/test_fsdp.py
+          - tests/distributed/test_tensor_parallel.py
+          - tests/integration
+          - tests/end_to_end
+          - tests/performance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]"
+
+      - name: Report the runner's resources
+        # Distributed tests skip themselves when the runner cannot host the
+        # ranks they need; printing this makes such a skip explicable rather
+        # than mysterious.
+        run: |
+          echo "cores: $(nproc)"
+          free -m
+          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.device_count())"
+
+      - name: Run suite
+        run: pytest -q "${{ matrix.suite }}" -m "not cuda and not multigpu" --timeout=600
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]"
+
+      - name: Coverage over the unit suite
+        # NOTE: this measures the *parent* process only.  Code that runs inside
+        # spawned ranks -- most of collectives.py, ddp.py and fsdp.py -- is
+        # exercised by the distributed jobs above but does not appear here,
+        # because child coverage data is not merged.  The number is therefore a
+        # floor, not a measurement.  See docs/11_testing_strategy.md section 9.
+        run: |
+          pytest -q tests/unit \
+            --cov=hybrid_training --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+  examples:
+    name: examples run under torchrun
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]"
+
+      - name: Two-rank DDP
+        run: torchrun --standalone --nproc-per-node=2 examples/train_ddp.py --steps 4
+
+      - name: Two-rank FSDP
+        run: torchrun --standalone --nproc-per-node=2 examples/train_fsdp.py --steps 4
+
+      - name: Two-rank tensor parallel
+        run: torchrun --standalone --nproc-per-node=2 examples/train_tensor_parallel.py --steps 4
+
+      - name: Two-rank sequence parallel
+        run: torchrun --standalone --nproc-per-node=2 examples/train_sequence_parallel.py --steps 4
+
+      - name: Four-rank hybrid
+        run: |
+          torchrun --standalone --nproc-per-node=4 examples/train_hybrid.py \
+            --config configs/fsdp_4gpu.yaml --steps 4
+
+      - name: Checkpoint save and inspect
+        run: |
+          torchrun --standalone --nproc-per-node=2 \
+            examples/save_distributed_checkpoint.py \
+            --steps 4 --checkpoint-dir "${RUNNER_TEMP}/ckpt"
+          python scripts/inspect_checkpoint.py \
+            "${RUNNER_TEMP}/ckpt/checkpoint-step-000004" --tensors --limit 5
+
+      - name: Resume at a different world size
+        run: python examples/resume_with_different_world_size.py --steps 4 --save-at 2
+
+      - name: Benchmark smoke
+        run: python scripts/benchmark.py --world-size 2 --steps 3 --warmup 1
