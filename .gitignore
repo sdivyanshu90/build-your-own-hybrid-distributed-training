@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.env
+
+# testing / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# project artefacts
+runs/
+checkpoints/
+outputs/
+*.log
+benchmark_results/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
