@@ -1,0 +1,60 @@
+# Single-process baseline.
+#
+# This is the reference every equivalence test compares against.  It runs the
+# *same* code as a distributed job -- a real (one-member) process group is
+# created and every collective executes as an identity operation -- so it
+# exercises the distributed code paths rather than bypassing them.
+#
+#   python examples/train_ddp.py --config configs/single_process.yaml
+name: single-process
+backend: auto        # 'auto' picks gloo/cpu unless there is a GPU per process
+device: auto
+timeout_seconds: 300.0
+
+topology:
+  data_parallel_size: 1
+  shard_parallel_size: 1
+  sequence_parallel_size: 1
+  tensor_parallel_size: 1
+  sequence_parallel_mode: disabled
+
+model:
+  kind: mlp
+  input_size: 32
+  hidden_size: 64
+  num_layers: 3
+  output_size: 8
+  activation: gelu
+  dropout: 0.0
+
+data:
+  micro_batch_size: 8
+  num_train_samples: 512
+  num_eval_samples: 128
+  seed: 1234
+  shuffle: true
+
+optimizer:
+  name: adamw
+  learning_rate: 0.003
+  weight_decay: 0.01
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+  min_lr_ratio: 0.1
+
+training:
+  max_steps: 40
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  eval_every_steps: 20
+  deterministic: true
+  collect_metrics: true
+
+checkpoint:
+  directory: runs/single-process
+  save_every_steps: 0
+  keep_last: 2
