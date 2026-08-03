@@ -1,0 +1,72 @@
+# Two-way FSDP-style sharding.
+#
+#   torchrun --standalone --nproc-per-node=2 examples/train_fsdp.py
+#
+# This is the default configuration for `examples/train_fsdp.py`, chosen so the
+# example runs on any two-rank machine.  `configs/fsdp_4gpu.yaml` is the same
+# experiment at four-way sharding.
+#
+# Parameters, gradients and optimizer state are each split two ways.  Per-rank
+# persistent memory is ~1/2 of the DDP figure; the cost is one all-gather per
+# unit per forward, one more per backward (reshard_after_forward), and one
+# reduce-scatter per unit per step.
+#
+# Because `data_parallel_size` is 1, every rank sees the *same* micro-batch and
+# there is no gradient all-reduce: the reduce-scatter over the shard group is
+# the whole gradient path.  That is what makes this configuration the clean one
+# for reading FSDP in isolation.
+name: fsdp-2
+backend: auto
+device: auto
+timeout_seconds: 300.0
+
+topology:
+  data_parallel_size: 1
+  shard_parallel_size: 2
+  sequence_parallel_size: 1
+  tensor_parallel_size: 1
+  sequence_parallel_mode: disabled
+
+model:
+  kind: mlp
+  input_size: 32
+  hidden_size: 128
+  num_layers: 4
+  output_size: 8
+
+data:
+  micro_batch_size: 4
+  num_train_samples: 1024
+  num_eval_samples: 128
+  seed: 1234
+
+optimizer:
+  name: adamw
+  learning_rate: 0.003
+  weight_decay: 0.01
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+  min_lr_ratio: 0.1
+
+training:
+  max_steps: 40
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  collect_metrics: true
+
+fsdp:
+  reshard_after_forward: true
+  average_gradients: true
+  # One unit per block: each MLPBlock has 128*128 + 128 parameters, so a
+  # threshold of 1000 puts every block in its own unit and keeps the transient
+  # all-gather buffer to one block rather than the whole model.
+  auto_wrap_min_num_params: 1000
+  check_reduction_order: false
+
+checkpoint:
+  directory: runs/fsdp-2
+  save_every_steps: 20
+  keep_last: 2
