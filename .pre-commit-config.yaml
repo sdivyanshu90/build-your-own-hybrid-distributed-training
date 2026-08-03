@@ -1,0 +1,38 @@
+# Formatting and linting are both handled by Ruff; `black` is intentionally not
+# installed (see pyproject.toml -> [tool.ruff.format]).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.1
+    hooks:
+      - id: mypy
+        files: ^src/hybrid_training/
+        additional_dependencies:
+          - types-PyYAML
+        # pre-commit runs mypy in an isolated environment, so `torch` is not
+        # importable there and every `import torch` would be reported as a
+        # missing import.  Installing torch into the hook environment would add
+        # a ~2 GB download to every `pre-commit install`; ignoring missing
+        # imports here is the proportionate trade.  The *authoritative* type
+        # check is `make typecheck` / the CI job, which runs with torch present
+        # and without this flag.
+        args: ["--config-file=pyproject.toml", "--ignore-missing-imports"]
