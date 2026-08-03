@@ -1,0 +1,95 @@
+# Hybrid on four ranks: data parallel x FSDP sharding.
+#
+#   torchrun --standalone --nproc-per-node=4 examples/train_hybrid.py
+#
+# This is the default configuration for `examples/train_hybrid.py` and the
+# smallest genuinely hybrid setup: two mechanisms whose gradient reductions
+# compose.  `configs/hybrid_8gpu.yaml` adds the tensor and sequence dimensions
+# on top of exactly this layout.
+#
+# It is the arrangement PyTorch calls HYBRID_SHARD: shard the parameters inside
+# a group (here, within a node) and replicate across groups.  The point is that
+# the *expensive* collective (all-gather of parameters, every layer, every step)
+# stays inside the shard group, while the cheap one (a single all-reduce of the
+# already-reduced gradient shard) is the only traffic that crosses between them.
+#
+# world_size = dp(2) * shard(2) * sequence(1) * tensor(1) = 4
+#
+# Rank layout (slowest-varying dimension first: dp, shard, sequence, tensor):
+#
+#   rank  dp sh   data_parallel  shard    dp_shard
+#   ----  -- --   -------------  -------  ------------
+#    0     0  0   (0, 2)         (0, 1)   (0, 1, 2, 3)
+#    1     0  1   (1, 3)         (0, 1)   (0, 1, 2, 3)
+#    2     1  0   (0, 2)         (2, 3)   (0, 1, 2, 3)
+#    3     1  1   (1, 3)         (2, 3)   (0, 1, 2, 3)
+#
+# Note that `shard` groups adjacent ranks -- (0, 1) and (2, 3) -- because the
+# shard dimension varies faster than the data-parallel one.  That is the whole
+# reason for the dimension ordering: the all-gathers stay between neighbours.
+#
+# Gradient path for rank 0:
+#   1. reduce-scatter of the flat gradient over the shard group (0, 1).  Rank 0
+#      ends up holding the summed gradient for only the half of the parameters
+#      it owns.
+#   2. all-reduce of that shard over the data-parallel group (0, 2).  Rank 2
+#      owns the same half, so this is the one collective that has to cross
+#      between the two replicas -- and it moves half the flat parameter vector,
+#      not all of it.
+#
+# All four ranks see different data, so metrics are averaged over dp_shard =
+# (0, 1, 2, 3).  Compare `configs/fsdp_4gpu.yaml`, which spends all four ranks
+# on sharding and never all-reduces, and `configs/ddp_2gpu.yaml`, which
+# replicates and only all-reduces.
+name: hybrid-4
+backend: auto
+device: auto
+timeout_seconds: 600.0
+
+topology:
+  data_parallel_size: 2
+  shard_parallel_size: 2
+  sequence_parallel_size: 1
+  tensor_parallel_size: 1
+  sequence_parallel_mode: disabled
+
+model:
+  kind: transformer
+  vocab_size: 128
+  hidden_size: 64
+  num_heads: 4
+  num_layers: 2
+  ffn_hidden_size: 128
+  max_sequence_length: 32
+  dropout: 0.0
+
+data:
+  micro_batch_size: 2
+  sequence_length: 16
+  num_train_samples: 512
+  num_eval_samples: 64
+  seed: 1234
+
+optimizer:
+  name: adamw
+  learning_rate: 0.002
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+
+training:
+  max_steps: 30
+  gradient_accumulation_steps: 2
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  collect_metrics: true
+
+fsdp:
+  reshard_after_forward: true
+  auto_wrap_min_num_params: 0
+
+checkpoint:
+  directory: runs/hybrid-4
+  save_every_steps: 15
