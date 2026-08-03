@@ -1,0 +1,63 @@
+# Tensor parallelism fused with sequence parallelism (the Megatron schedule).
+#
+#   torchrun --standalone --nproc-per-node=2 examples/train_sequence_parallel.py \
+#       --config configs/sequence_parallel_2gpu.yaml
+#
+# `sequence_parallel_mode: tensor_group` means the sequence dimension is split
+# over the *tensor-parallel* ranks, so it consumes no extra ranks:
+#   world_size = 1 * 1 * 1 * 2 = 2
+# LayerNorm, dropout and the residual adds then operate on (batch, seq/2,
+# hidden) instead of (batch, seq, hidden), and the all-reduce that plain tensor
+# parallelism would perform becomes a reduce-scatter plus an all-gather --
+# identical bytes, half the activation memory.
+name: sequence-parallel-2
+backend: auto
+device: auto
+timeout_seconds: 300.0
+
+topology:
+  data_parallel_size: 1
+  shard_parallel_size: 1
+  sequence_parallel_size: 1     # stays 1: the sequence reuses the tensor group
+  tensor_parallel_size: 2
+  sequence_parallel_mode: tensor_group
+
+model:
+  kind: transformer
+  vocab_size: 128
+  hidden_size: 64
+  num_heads: 4
+  num_layers: 2
+  ffn_hidden_size: 128
+  max_sequence_length: 32
+  dropout: 0.0
+
+data:
+  micro_batch_size: 4
+  sequence_length: 16   # divisible by 2; other lengths are zero-padded
+  num_train_samples: 512
+  num_eval_samples: 64
+  seed: 1234
+
+optimizer:
+  name: adamw
+  learning_rate: 0.002
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+
+training:
+  max_steps: 40
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  collect_metrics: true
+
+tensor_parallel:
+  gather_output: false
+  sequence_parallel: true
+
+checkpoint:
+  directory: runs/sequence-parallel-2
+  save_every_steps: 20
