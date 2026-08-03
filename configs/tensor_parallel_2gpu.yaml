@@ -1,0 +1,59 @@
+# Two-way tensor parallelism on the small transformer.
+#
+#   torchrun --standalone --nproc-per-node=2 examples/train_tensor_parallel.py \
+#       --config configs/tensor_parallel_2gpu.yaml
+#
+# Every weight matrix is split across the two ranks: attention heads 0-1 on
+# rank 0 and 2-3 on rank 1, feed-forward columns likewise, and the vocabulary
+# is split for the embedding.  Both ranks see the *same* batch.
+name: tensor-parallel-2
+backend: auto
+device: auto
+timeout_seconds: 300.0
+
+topology:
+  data_parallel_size: 1
+  shard_parallel_size: 1
+  sequence_parallel_size: 1
+  tensor_parallel_size: 2
+  sequence_parallel_mode: disabled
+
+model:
+  kind: transformer
+  vocab_size: 128
+  hidden_size: 64
+  num_heads: 4          # must be divisible by tensor_parallel_size
+  num_layers: 2
+  ffn_hidden_size: 128  # must be divisible by tensor_parallel_size
+  max_sequence_length: 32
+  dropout: 0.0
+
+data:
+  micro_batch_size: 4
+  sequence_length: 16
+  num_train_samples: 512
+  num_eval_samples: 64
+  seed: 1234
+
+optimizer:
+  name: adamw
+  learning_rate: 0.002
+
+scheduler:
+  name: cosine
+  warmup_steps: 5
+
+training:
+  max_steps: 40
+  max_grad_norm: 1.0
+  seed: 0
+  log_every_steps: 10
+  collect_metrics: true
+
+tensor_parallel:
+  gather_output: false
+  sequence_parallel: false
+
+checkpoint:
+  directory: runs/tensor-parallel-2
+  save_every_steps: 20
